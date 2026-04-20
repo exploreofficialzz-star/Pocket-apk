@@ -3,7 +3,7 @@ name: Build APK
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch:      # allows manual trigger from GitHub UI
+  workflow_dispatch:
 
 jobs:
   build:
@@ -22,40 +22,41 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Download Gradle wrapper jar
+        run: |
+          mkdir -p gradle/wrapper
+          curl -L -o gradle/wrapper/gradle-wrapper.jar \
+            "https://github.com/gradle/gradle/raw/v8.4.0/gradle/wrapper/gradle-wrapper.jar"
+
       - name: Make gradlew executable
         run: chmod +x gradlew
 
       - name: Build Release APK
-        run: ./gradlew assembleRelease
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: PO-Signal-Bot-APK
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 30
 
-      - name: Create Release
+      - name: Create GitHub Release with APK
         uses: softprops/action-gh-release@v1
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         with:
           tag_name: v1.0.${{ github.run_number }}
-          name: PO Signal Bot v1.0.${{ github.run_number }}
+          name: "PO Signal Bot v1.0.${{ github.run_number }}"
           files: app/build/outputs/apk/release/app-release.apk
           body: |
             ## PO Signal Bot Android App
 
-            ### Install
-            1. Download the APK file below
-            2. On your Android phone: Settings → Security → Allow Unknown Sources
-            3. Open the APK and install
-            4. Open the app → Login to Pocket Option → Bot connects automatically
+            Download `app-release.apk` below
 
-            ### What it does
-            - Opens Pocket Option in a built-in browser
-            - Automatically extracts your session after login
-            - Sends it to the signal bot on Render
-            - You only need to do this once
+            ### Install
+            1. Download APK to your phone
+            2. Settings → Security → Allow unknown sources
+            3. Tap APK → Install
+            4. Open app → login to PO → bot connects automatically
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
