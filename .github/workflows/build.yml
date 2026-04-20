@@ -30,6 +30,9 @@ jobs:
           /tmp/gradle-install/gradle-8.4/bin/gradle wrapper --gradle-version 8.4 \
             --project-dir ${{ github.workspace }}
 
+      - name: Set gradle properties
+        run: echo "android.useAndroidX=true" >> gradle.properties
+
       - name: Make gradlew executable
         run: chmod +x gradlew
 
