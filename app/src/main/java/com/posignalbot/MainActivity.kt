@@ -319,14 +319,20 @@ class JsBridge(
         }
     }
 
-    private fun postToBot(ssid: String) {
-        val client = OkHttpClient()
+    private fun postToBot(ssid: String, attempt: Int = 1) {
+        val client = OkHttpClient.Builder()
+            .connectTimeout(35, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(35, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(35, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
         val body = JSONObject().apply { put("ssid", ssid) }.toString()
         val request = Request.Builder()
             .url("https://pocket-bot-ssh6.onrender.com/ssid")
             .post(body.toRequestBody("application/json".toMediaType()))
             .addHeader("Content-Type", "application/json")
             .build()
+
+        onResult(false, "⏳ Connecting to bot server (attempt $attempt/3)...")
 
         client.newCall(request).enqueue(object : Callback {
             override fun onResponse(call: Call, response: Response) {
@@ -342,9 +348,19 @@ class JsBridge(
                 }
             }
             override fun onFailure(call: Call, e: IOException) {
-                sent = false
-                onResult(false, "Network error: ${e.message}")
+                android.util.Log.e("POBridge", "Attempt $attempt failed: ${e.message}")
+                if (attempt < 3) {
+                    // Retry after 5 seconds — Render may still be waking up
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        postToBot(ssid, attempt + 1)
+                    }, 5000)
+                } else {
+                    sent = false
+                    onResult(false, "❌ Could not reach bot server after 3 attempts.
+Make sure the Render bot is deployed and running.")
+                }
             }
         })
     }
-}
+            }
+            
